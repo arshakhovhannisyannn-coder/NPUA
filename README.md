@@ -1,8 +1,8 @@
-📚 Algorithms – NPUA
+NPUA
 
-Ակադեմիական նախագիծ՝ իրականացված National Polytechnic University of Armenia (NPUA)-ում։
+Այս աշխատանքները իրականացված է National Polytechnic University of Armenia (NPUA)-ում։
 
-📂 Ֆայլեր
+Ֆայլեր
 
 searching.py – Գծային և բինար որոնում
 

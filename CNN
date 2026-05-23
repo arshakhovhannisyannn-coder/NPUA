@@ -1,0 +1,387 @@
+!pip install kaggle -q
+
+from google.colab import files
+uploaded = files.upload()
+
+!mkdir -p ~/.kaggle
+!cp kaggle.json ~/.kaggle/kaggle.json
+!chmod 600 ~/.kaggle/kaggle.json
+
+!kaggle datasets download -d swaroopkml/cifar10-pngs-in-folders
+!unzip -q cifar10-pngs-in-folders.zip
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import transforms, models
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader, random_split
+from sklearn.metrics import classification_report, confusion_matrix
+from tqdm import tqdm
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
+# -----------------------------
+# Image Transformations
+# -----------------------------
+
+train_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomRotation(10),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.4914, 0.4822, 0.4465],
+        std=[0.2470, 0.2435, 0.2616]
+    )
+])
+
+test_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.4914, 0.4822, 0.4465],
+        std=[0.2470, 0.2435, 0.2616]
+    )
+])
+
+# -----------------------------
+# Dataset Loading
+# -----------------------------
+
+dataset_full = ImageFolder(
+    root="/content/cifar10/cifar10/train",
+    transform=None
+)
+
+train_size = int(len(dataset_full) * 0.8)
+val_size   = len(dataset_full) - train_size
+
+train_data, val_data = random_split(
+    dataset_full,
+    [train_size, val_size]
+)
+
+train_data.dataset.transform = train_transform
+val_data.dataset.transform   = test_transform
+
+test_data = ImageFolder(
+    root="/content/cifar10/cifar10/test",
+    transform=test_transform
+)
+
+print("=" * 50)
+print(f"Train Images      : {len(train_data)}")
+print(f"Validation Images : {len(val_data)}")
+print(f"Test Images       : {len(test_data)}")
+print("=" * 50)
+
+class_names = dataset_full.classes
+
+print("Classes:")
+for i, c in enumerate(class_names):
+    print(f"{i} --> {c}")
+
+img, lbl = train_data[0]
+print("\nSample Image Shape:", img.shape)
+
+# -----------------------------
+# DataLoaders
+# -----------------------------
+
+train_loader = DataLoader(
+    train_data,
+    batch_size=64,
+    shuffle=True
+)
+
+val_loader = DataLoader(
+    val_data,
+    batch_size=64,
+    shuffle=False
+)
+
+test_loader = DataLoader(
+    test_data,
+    batch_size=64,
+    shuffle=False
+)
+
+# -----------------------------
+# Model
+# -----------------------------
+
+model = models.resnet18(
+    weights=models.ResNet18_Weights.DEFAULT
+)
+
+model.fc = nn.Sequential(
+    nn.Dropout(0.3),
+    nn.Linear(model.fc.in_features, 10)
+)
+
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
+
+model = model.to(device)
+
+# -----------------------------
+# Loss / Optimizer
+# -----------------------------
+
+criterion = nn.CrossEntropyLoss()
+
+optimizer = optim.Adam(
+    model.parameters(),
+    lr=0.001
+)
+
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode='max',
+    factor=0.5,
+    patience=2
+)
+
+# -----------------------------
+# Training
+# -----------------------------
+
+EPOCHS = 5
+
+train_losses = []
+val_losses   = []
+
+train_scores = []
+val_scores   = []
+
+best_accuracy = 0
+
+for epoch in range(EPOCHS):
+
+    # ===== TRAIN =====
+    model.train()
+
+    total_loss = 0
+    correct    = 0
+    total      = 0
+
+    progress_bar = tqdm(
+        train_loader,
+        desc=f"Epoch {epoch+1}/{EPOCHS} - Training",
+        leave=False
+    )
+
+    for images, labels in progress_bar:
+
+        images = images.to(device)
+        labels = labels.to(device)
+
+        optimizer.zero_grad()
+
+        outputs = model(images)
+
+        loss = criterion(outputs, labels)
+
+        loss.backward()
+
+        optimizer.step()
+
+        total_loss += loss.item()
+
+        predictions = outputs.argmax(dim=1)
+
+        total += labels.size(0)
+        correct += (predictions == labels).sum().item()
+
+        progress_bar.set_postfix({
+            "loss": f"{loss.item():.4f}",
+            "acc": f"{100 * correct / total:.2f}%"
+        })
+
+    train_acc = 100 * correct / total
+    train_loss = total_loss / len(train_loader)
+
+    train_losses.append(train_loss)
+    train_scores.append(train_acc)
+
+    # ===== VALIDATION =====
+    model.eval()
+
+    val_loss_total = 0
+    val_correct    = 0
+    val_total      = 0
+
+    with torch.no_grad():
+
+        for images, labels in tqdm(
+            val_loader,
+            desc=f"Epoch {epoch+1}/{EPOCHS} - Validation",
+            leave=False
+        ):
+
+            images = images.to(device)
+            labels = labels.to(device)
+
+            outputs = model(images)
+
+            loss = criterion(outputs, labels)
+
+            val_loss_total += loss.item()
+
+            predictions = outputs.argmax(dim=1)
+
+            val_total += labels.size(0)
+            val_correct += (predictions == labels).sum().item()
+
+    val_acc = 100 * val_correct / val_total
+    val_loss = val_loss_total / len(val_loader)
+
+    val_losses.append(val_loss)
+    val_scores.append(val_acc)
+
+    scheduler.step(val_acc)
+
+    # ===== SAVE BEST MODEL =====
+    if val_acc > best_accuracy:
+        best_accuracy = val_acc
+        torch.save(model.state_dict(), "best_model_resnet18.pth")
+
+    print(f"\nEpoch [{epoch+1}/{EPOCHS}]")
+    print(f"Train Loss : {train_loss:.4f}")
+    print(f"Val Loss   : {val_loss:.4f}")
+    print(f"Train Acc  : {train_acc:.2f}%")
+    print(f"Val Acc    : {val_acc:.2f}%")
+    print("-" * 40)
+
+# -----------------------------
+# Testing
+# -----------------------------
+
+model.load_state_dict(
+    torch.load("best_model_resnet18.pth")
+)
+
+model.eval()
+
+test_correct = 0
+test_total   = 0
+
+all_predictions = []
+all_targets     = []
+
+with torch.no_grad():
+
+    for images, labels in tqdm(
+        test_loader,
+        desc="Testing",
+        leave=False
+    ):
+
+        images = images.to(device)
+        labels = labels.to(device)
+
+        outputs = model(images)
+
+        preds = outputs.argmax(dim=1)
+
+        test_total += labels.size(0)
+        test_correct += (preds == labels).sum().item()
+
+        all_predictions.extend(preds.cpu().numpy())
+        all_targets.extend(labels.cpu().numpy())
+
+test_accuracy = 100 * test_correct / test_total
+
+print(f"\nFinal Test Accuracy : {test_accuracy:.2f}%")
+
+# -----------------------------
+# Loss Graph
+# -----------------------------
+
+plt.figure(figsize=(8,5))
+
+plt.plot(train_losses, marker='o', label="Train Loss")
+plt.plot(val_losses, marker='s', label="Validation Loss")
+
+plt.title("Loss Curve")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+
+plt.grid(True)
+plt.legend()
+
+plt.show()
+
+# -----------------------------
+# Accuracy Graph
+# -----------------------------
+
+plt.figure(figsize=(8,5))
+
+plt.plot(train_scores, marker='o', label="Train Accuracy")
+plt.plot(val_scores, marker='s', label="Validation Accuracy")
+
+plt.title("Accuracy Curve")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy (%)")
+
+plt.grid(True)
+plt.legend()
+
+plt.show()
+
+# -----------------------------
+# Classification Report
+# -----------------------------
+
+print("\nClassification Report:\n")
+
+print(
+    classification_report(
+        all_targets,
+        all_predictions,
+        target_names=class_names
+    )
+)
+
+# -----------------------------
+# Confusion Matrix
+# -----------------------------
+
+matrix = confusion_matrix(
+    all_targets,
+    all_predictions
+)
+
+plt.figure(figsize=(11, 8))
+
+sns.heatmap(
+    matrix,
+    annot=True,
+    fmt="d",
+    cmap="Blues",
+    xticklabels=class_names,
+    yticklabels=class_names
+)
+
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+
+plt.show()
+
+# -----------------------------
+# Save Final Model
+# -----------------------------
+
+torch.save(
+    model.state_dict(),
+    "final_resnet18_cifar10_model.pth"
+)
+
+print("\nModel Saved Successfully!")
